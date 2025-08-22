@@ -15,7 +15,8 @@ jobs:
           sudo apt update
           sudo apt install -y git python3
           git clone https://android.googlesource.com/platform/external/avb
-          sudo cp avb/avbtool /usr/local/bin/avbtool
+          cd avb/avbtool
+          sudo cp avbtool /usr/local/bin/avbtool
           sudo chmod +x /usr/local/bin/avbtool
           
       - name: Generate Verity Metadata
@@ -23,4 +24,5 @@ jobs:
           avbtool make_vbmeta_image \
             --include_descriptors_from_image system.img \
             --output vbmeta.img || echo "Skipping metadata since dummy image"
+
 
