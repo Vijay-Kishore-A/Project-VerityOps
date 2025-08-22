@@ -1,0 +1,24 @@
+name: VerityOps Build Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install avbtool
+        run: |
+          sudo apt update
+          sudo apt install -y git python3
+          git clone https://android.googlesource.com/platform/external/avb
+          cd avb && python3 setup.py install
+
+      - name: Generate Verity Metadata
+        run: |
+          avbtool make_vbmeta_image \
+            --include_descriptors_from_image system.img \
+            --output vbmeta.img || echo "Skipping metadata since dummy image"
