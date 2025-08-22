@@ -24,6 +24,19 @@ jobs:
             --include_descriptors_from_image system.img \
             --output vbmeta.img || echo "Skipping metadata since dummy image"
 
+  verify:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Clone avbtool
+        run: |
+          git clone https://android.googlesource.com/platform/external/avb
+
+      - name: Verify dm-verity metadata
+        run: |
+          python3 avb/avbtool info_image --image system.img | grep "dm-verity" || (echo "dm-verity not found in system.img" && exit 1)
 
 
 
