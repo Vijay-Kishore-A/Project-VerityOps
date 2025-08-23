@@ -39,3 +39,4 @@ jobs:
           python3 avb/avbtool info_image --image system.img | grep "dm-verity" || (echo "dm-verity not found in system.img" && exit 1)
 
 
+
