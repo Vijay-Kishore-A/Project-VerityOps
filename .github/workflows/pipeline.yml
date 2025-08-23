@@ -3,58 +3,124 @@ name: VerityOps Build Pipeline
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
-        with:
-          lfs: true   # pull the real 4.1 GB system.img, not the LFS pointer
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - name: Clone avbtool
+      - name: Install tools & clone avbtool
         run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs xxd openssl git python3
           git clone https://android.googlesource.com/platform/external/avb
-          ls -la avb   # sanity check: should show avbtool.py at repo root
+          ls -la avb
+          test -f avb/avbtool.py || { echo "❌ avbtool.py not found after clone"; exit 1; }
 
-      - name: Generate Verity Metadata (vbmeta.img)
+      - name: Create minimal ext4 system image (128 MiB)
         run: |
-          # Try to build vbmeta from descriptors inside system.img.
-          # Not all emulator images have footers/hashtrees in system.img; if not, this will no-op gracefully.
-          python3 avb/avbtool.py make_vbmeta_image \
-            --include_descriptors_from_image system.img \
-            --output vbmeta.img || echo "Skipping vbmeta generation (no descriptors/footer found in system.img)"
+          set -euo pipefail
+          dd if=/dev/zero of=system.img bs=1M count=128
+          mkfs.ext4 -F -L system system.img
+          stat -c "Created system.img size=%s bytes" system.img
 
-      - name: Upload vbmeta (artifact)
-        uses: actions/upload-artifact@v4
+      - name: Generate test AVB key (demo only)
+        run: |
+          set -euo pipefail
+          openssl genrsa -out testkey_rsa2048.pem 2048
+          openssl rsa -in testkey_rsa2048.pem -pubout -out testkey_rsa2048_pub.pem
+
+      - name: Compute padded partition size (leave room for footer/tree)
+        id: prep
+        run: |
+          set -euo pipefail
+          SIZE=$(stat -c%s system.img)
+          EXTRA=$((64*1024*1024))  # 64 MiB headroom
+          PART_SIZE=$(( ( (SIZE + EXTRA + 4095) / 4096 ) * 4096 ))
+          echo "part_size=$PART_SIZE" >> $GITHUB_OUTPUT
+          echo "orig_size=$SIZE" >> $GITHUB_OUTPUT
+          echo "Calculated partition_size=$PART_SIZE (orig=$SIZE)"
+
+      - name: Add dm-verity hashtree footer to system image
+        run: |
+          set -euo pipefail
+          cp system.img system_with_hashtree.img
+          SALT=$(head -c 32 /dev/urandom | xxd -p)
+          echo "Using salt=$SALT"
+          python3 avb/avbtool.py add_hashtree_footer \
+            --image system_with_hashtree.img \
+            --partition_name system \
+            --partition_size "${{ steps.prep.outputs.part_size }}" \
+            --hash_algorithm sha256 \
+            --salt "$SALT" \
+            --key testkey_rsa2048.pem \
+            --algorithm SHA256_RSA2048 \
+            --do_not_generate_fec
+
+      - name: Build top-level vbmeta from descriptors in image
+        run: |
+          set -euo pipefail
+          python3 avb/avbtool.py make_vbmeta_image \
+            --include_descriptors_from_image system_with_hashtree.img \
+            --key testkey_rsa2048.pem \
+            --algorithm SHA256_RSA2048 \
+            --output vbmeta.img
+
+      - name: Inspect augmented image & vbmeta (expect Hashtree)
+        run: |
+          set -euo pipefail
+          python3 avb/avbtool.py info_image --image system_with_hashtree.img | tee info_image.txt
+          python3 avb/avbtool.py info_image --image vbmeta.img | tee info_vbmeta.txt
+
+      - name: Compress and upload artifacts
+        run: |
+          set -euo pipefail
+          gzip -9c system_with_hashtree.img > system_with_hashtree.img.gz
+          gzip -9c vbmeta.img > vbmeta.img.gz
+        shell: bash
+      - uses: actions/upload-artifact@v4
         with:
-          name: vbmeta
-          path: vbmeta.img
-          if-no-files-found: ignore
+          name: verity-artifacts
+          path: |
+            system_with_hashtree.img.gz
+            vbmeta.img.gz
+            info_image.txt
+            info_vbmeta.txt
 
   verify:
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v3
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
         with:
-          lfs: true   # again: fetch the real system.img
+          name: verity-artifacts
+
+      - name: Decompress artifacts
+        run: |
+          set -euo pipefail
+          gunzip -c system_with_hashtree.img.gz > system_with_hashtree.img
+          gunzip -c vbmeta.img.gz > vbmeta.img
 
       - name: Clone avbtool
         run: |
+          set -euo pipefail
           git clone https://android.googlesource.com/platform/external/avb
-          ls -la avb   # should show avbtool.py
+          ls -la avb
+          test -f avb/avbtool.py || { echo "❌ avbtool.py not found after clone"; exit 1; }
 
       - name: Verify dm-verity / hashtree presence
         run: |
-          # avbtool info_image prints descriptors; on images with hashtree (dm-verity) you'll see "Hashtree" fields.
-          # Grep for several canonical tokens to avoid brittle matching.
-          python3 avb/avbtool.py info_image --image system.img | tee info.txt
-          egrep -i "hashtree|hash tree|dm-verity" info.txt >/dev/null \
-            || (echo "❌ No hashtree/dm-verity descriptors found in system.img" && exit 1)
-
-      - name: Upload info dump (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: info-image
-          path: info.txt
+          set -euo pipefail
+          echo "---- vbmeta ----"
+          python3 avb/avbtool.py info_image --image vbmeta.img | tee verify_vbmeta.txt
+          echo "---- augmented system image ----"
+          python3 avb/avbtool.py info_image --image system_with_hashtree.img | tee verify_image.txt
+          egrep -i "hashtree|hash tree|dm-verity" verify_vbmeta.txt verify_image.txt >/dev/null \
+            || (echo "❌ No hashtree/dm-verity descriptors found" && exit 1)
