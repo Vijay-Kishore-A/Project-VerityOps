@@ -14,32 +14,65 @@ on:
 jobs:
   tamper_test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/download-artifact@v4
-        with: { name: verity-artifacts }
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - name: Decompress
+      - name: Install deps & clone avbtool
         run: |
-          gunzip -c system_with_hashtree.img.gz > system_with_hashtree.img
-          gunzip -c vbmeta.img.gz > vbmeta.img
-
-      - name: Clone avbtool
-        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs xxd openssl git python3 gzip
           git clone https://android.googlesource.com/platform/external/avb
           test -f avb/avbtool.py || { echo "avbtool.py missing"; exit 1; }
 
-      - name: Tamper & compare digests
+      - name: Generate demo AVB key
         run: |
-          bash scripts/tamper.sh system_with_hashtree.img vbmeta.img testkey_rsa2048.pem \
-            "${{ inputs.seek_block }}" "${{ inputs.count_blocks }}"
+          openssl genrsa -out testkey_rsa2048.pem 2048
+          openssl rsa -in testkey_rsa2048.pem -pubout -out testkey_rsa2048_pub.pem
 
-      - name: Summary
+      - name: Create ext4 image (128MiB)
+        run: bash scripts/make_ext4.sh system.img 128
+
+      - name: Add dm-verity hashtree
+        run: bash scripts/add_hashtree.sh system.img system_with_hashtree.img testkey_rsa2048.pem 64
+
+      - name: Make vbmeta
+        run: bash scripts/make_vbmeta.sh system_with_hashtree.img testkey_rsa2048.pem vbmeta.img
+
+      - name: Baseline vbmeta digest
+        run: |
+          python3 avb/avbtool.py calculate_vbmeta_digest \
+            --image vbmeta.img --hash_algorithm sha256 | tee digest_clean.txt
+
+      - name: Tamper image & recompute vbmeta
+        run: |
+          cp system_with_hashtree.img system_tampered.img
+          dd if=/dev/urandom of=system_tampered.img bs=4096 \
+             count=${{ inputs.count_blocks }} seek=${{ inputs.seek_block }} conv=notrunc
+          python3 avb/avbtool.py make_vbmeta_image \
+            --include_descriptors_from_image system_tampered.img \
+            --key testkey_rsa2048.pem \
+            --algorithm SHA256_RSA2048 \
+            --output vbmeta_tampered.img
+          python3 avb/avbtool.py calculate_vbmeta_digest \
+            --image vbmeta_tampered.img --hash_algorithm sha256 | tee digest_tampered.txt
+
+      - name: Enforce tamper detection
+        run: |
+          if diff -q digest_clean.txt digest_tampered.txt >/dev/null; then
+            echo "Tamper NOT detected (digests identical)"; exit 1
+          else
+            echo "Tamper detected (vbmeta digest changed)"
+          fi
+
+      - name: Publish summary
         run: |
           {
-            echo "## Tamper Test"
+            echo "## VerityOps Tamper Test"
             echo ""
-            echo "**Blocks flipped:** ${{ inputs.count_blocks }} at block ${{ inputs.seek_block }}"
+            echo "**Blocks flipped:** ${{ inputs.count_blocks }} @ block ${{ inputs.seek_block }}"
             echo ""
             echo "### vbmeta digests"
             echo '```'
@@ -47,3 +80,13 @@ jobs:
             paste <(echo -n "tampered ") digest_tampered.txt
             echo '```'
           } >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: tamper-evidence
+          path: |
+            digest_clean.txt
+            digest_tampered.txt
+            vbmeta.img
+            vbmeta_tampered.img
