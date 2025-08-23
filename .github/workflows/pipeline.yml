@@ -50,8 +50,8 @@ jobs:
         run: |
           set -euo pipefail
           cp system.img system_with_hashtree.img
-          SALT=$(head -c 32 /dev/urandom | xxd -p)
-          echo "Using salt=$SALT"
+          SALT=$(openssl rand -hex 32)   # ✅ no newlines, always even-length
+          echo "Using salt=$SALT (len=$(echo -n "$SALT" | wc -c))"
           python3 avb/avbtool.py add_hashtree_footer \
             --image system_with_hashtree.img \
             --partition_name system \
@@ -124,3 +124,4 @@ jobs:
           python3 avb/avbtool.py info_image --image system_with_hashtree.img | tee verify_image.txt
           egrep -i "hashtree|hash tree|dm-verity" verify_vbmeta.txt verify_image.txt >/dev/null \
             || (echo "❌ No hashtree/dm-verity descriptors found" && exit 1)
+
