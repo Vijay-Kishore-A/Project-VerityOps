@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+        with:
+          lfs: true   # ✅ fetch real system.img, not LFS pointer
 
       - name: Install avbtool
         run: |
@@ -29,6 +31,8 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v3
+        with:
+          lfs: true   # ✅ fetch real system.img, not LFS pointer
 
       - name: Clone avbtool
         run: |
@@ -36,7 +40,4 @@ jobs:
 
       - name: Verify dm-verity metadata
         run: |
-          python3 avb/avbtool info_image --image system.img | grep "dm-verity" || (echo "dm-verity not found in system.img" && exit 1)
-
-
-
+          python3 avb/avbtool info_image --image system.img | grep "dm-verity" || (echo "❌ dm-verity not found in system.img" && exit 1)
