@@ -1,0 +1,49 @@
+name: VerityOps Tamper Test
+on:
+  workflow_dispatch:
+    inputs:
+      seek_block:
+        description: "4KiB block index to flip"
+        required: true
+        default: "100"
+      count_blocks:
+        description: "How many 4KiB blocks to flip"
+        required: true
+        default: "1"
+
+jobs:
+  tamper_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: verity-artifacts }
+
+      - name: Decompress
+        run: |
+          gunzip -c system_with_hashtree.img.gz > system_with_hashtree.img
+          gunzip -c vbmeta.img.gz > vbmeta.img
+
+      - name: Clone avbtool
+        run: |
+          git clone https://android.googlesource.com/platform/external/avb
+          test -f avb/avbtool.py || { echo "avbtool.py missing"; exit 1; }
+
+      - name: Tamper & compare digests
+        run: |
+          bash scripts/tamper.sh system_with_hashtree.img vbmeta.img testkey_rsa2048.pem \
+            "${{ inputs.seek_block }}" "${{ inputs.count_blocks }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Tamper Test"
+            echo ""
+            echo "**Blocks flipped:** ${{ inputs.count_blocks }} at block ${{ inputs.seek_block }}"
+            echo ""
+            echo "### vbmeta digests"
+            echo '```'
+            paste <(echo -n "clean    ") digest_clean.txt
+            paste <(echo -n "tampered ") digest_tampered.txt
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
