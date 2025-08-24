@@ -32,11 +32,11 @@ jobs:
           openssl genrsa -out testkey_rsa2048.pem 2048
           openssl rsa -in testkey_rsa2048.pem -pubout -out testkey_rsa2048_pub.pem
 
-      - name: Create ext4 image (128MiB)
-        run: bash scripts/make_ext4.sh system.img 128
+      - name: Create ext4 image (32MiB)
+        run: bash scripts/make_ext4.sh system.img 32
 
       - name: Add dm-verity hashtree
-        run: bash scripts/add_hashtree.sh system.img system_with_hashtree.img testkey_rsa2048.pem 64
+        run: bash scripts/add_hashtree.sh system.img system_with_hashtree.img testkey_rsa2048.pem 16
 
       - name: Make vbmeta
         run: bash scripts/make_vbmeta.sh system_with_hashtree.img testkey_rsa2048.pem vbmeta.img
@@ -55,6 +55,7 @@ jobs:
       - name: Baseline verify (clean image should pass)
         run: |
           set -e
+          /usr/bin/time -f 'verify(clean): %E cpu:%P mem:%MKB' \
           python3 avb/avbtool.py verify_image --image system_with_hashtree.img
           echo "Clean image verified OK"
 
