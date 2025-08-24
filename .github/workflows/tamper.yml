@@ -108,7 +108,7 @@ jobs:
               --salt=${{ steps.params.outputs.salt }} \
               system_with_hashtree.img system_with_hashtree.img \
               ${{ steps.params.outputs.root }}
-          echo "✅ Clean image verified OK (veritysetup)"
+          echo "Clean image verified OK (veritysetup)"
 
       - name: Tamper image (flip blocks)
         run: |
@@ -132,10 +132,39 @@ jobs:
               ${{ steps.params.outputs.root }}
           rc=$?
           if [ "$rc" -eq 0 ]; then
-            echo "❌ Tamper NOT detected (verification still passes)"; exit 1
+            echo "Tamper NOT detected (verification still passes)"; exit 1
           else
-            echo "✅ Tamper detected (verification fails as expected)"; exit 0
+            echo "Tamper detected (verification fails as expected)"; exit 0
           fi
+
+      - name: Kernel dm-verity mapping (tampered) and dmesg capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Create a loop device for the tampered image
+          LOOP=$(sudo losetup --find --show system_tampered.img)
+          # Open a verity mapping (same file for data+hash; offset selects hash tree)
+          sudo veritysetup create vmap --debug \
+            --no-superblock \
+            --data-block-size=${{ steps.params.outputs.dbs }} \
+            --hash-block-size=${{ steps.params.outputs.hbs }} \
+            --data-blocks=${{ steps.params.outputs.datablocks }} \
+            --hash-offset=${{ steps.params.outputs.off }} \
+            --salt=${{ steps.params.outputs.salt }} \
+            "$LOOP" "$LOOP" \
+            ${{ steps.params.outputs.root }} || true
+          # Try to read; should trigger I/O error + kernel verity message
+          sudo dd if=/dev/mapper/vmap of=/dev/null bs=4096 count=1 iflag=direct 2>&1 || true
+          dmesg | tail -n 200 > verity_dmesg.txt
+          # Cleanup
+          sudo veritysetup remove vmap || true
+          sudo losetup -d "$LOOP" || true
+      - name: Upload kernel logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: verity-kernel-logs
+          path: verity_dmesg.txt
+
 
       - name: Publish summary
         run: |
