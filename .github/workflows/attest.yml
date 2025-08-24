@@ -1,0 +1,49 @@
+name: Cosign Attestation
+on:
+  workflow_run:
+    workflows: ["VerityOps Tamper Test"]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  attest:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download provenance bundle
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: provenance-bundle
+          path: prov
+          merge-multiple: true
+
+      - name: Install cosign
+        run: |
+          COSIGN_VERSION=$(curl -s https://api.github.com/repos/sigstore/cosign/releases/latest | jq -r .tag_name)
+          curl -sL https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64 \
+            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+
+      - name: Create predicate & attest (keyless)
+        run: |
+          cat > predicate.json <<EOF
+          {
+            "repo": "${GITHUB_REPOSITORY}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "commit": "${GITHUB_SHA}",
+            "build_type": "verityops/provenance",
+            "materials": ["prov/CHECKSUMS.txt", "prov/SBOM.artifacts.spdx.json", "prov/PROVENANCE.txt"]
+          }
+          EOF
+          # Create a tar digest to attest (simple target)
+          tar czf prov.tar.gz -C prov .
+          cosign attest --yes --predicate predicate.json --type verityops-provenance \
+            --bundle cosign-bundle.json prov.tar.gz
+      - name: Upload attestation bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosign-attestation
+          path: cosign-bundle.json
