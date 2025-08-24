@@ -46,26 +46,30 @@ jobs:
           python3 avb/avbtool.py calculate_vbmeta_digest \
             --image vbmeta.img --hash_algorithm sha256 | tee digest_clean.txt
 
-      - name: Tamper image & recompute vbmeta
+      - name: Tamper image (flip blocks)
         run: |
           cp system_with_hashtree.img system_tampered.img
           dd if=/dev/urandom of=system_tampered.img bs=4096 \
              count=${{ inputs.count_blocks }} seek=${{ inputs.seek_block }} conv=notrunc
-          python3 avb/avbtool.py make_vbmeta_image \
-            --include_descriptors_from_image system_tampered.img \
-            --key testkey_rsa2048.pem \
-            --algorithm SHA256_RSA2048 \
-            --output vbmeta_tampered.img
-          python3 avb/avbtool.py calculate_vbmeta_digest \
-            --image vbmeta_tampered.img --hash_algorithm sha256 | tee digest_tampered.txt
 
-      - name: Enforce tamper detection
+      - name: Baseline verify (clean image should pass)
         run: |
-          if diff -q digest_clean.txt digest_tampered.txt >/dev/null; then
-            echo "Tamper NOT detected (digests identical)"; exit 1
+          set -e
+          python3 avb/avbtool.py verify_image --image system_with_hashtree.img
+          echo "Clean image verified OK"
+
+      - name: Tamper verify (tampered image must fail)
+        run: |
+          set +e
+          python3 avb/avbtool.py verify_image --image system_tampered.img
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "Tamper NOT detected (verification still passes)"
+            exit 1
           else
-            echo "Tamper detected (vbmeta digest changed)"
+            echo "Tamper detected (verification fails as expected)"
           fi
+
 
       - name: Publish summary
         run: |
