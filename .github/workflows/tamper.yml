@@ -1,4 +1,5 @@
 name: VerityOps Tamper Test
+
 on:
   workflow_dispatch:
     inputs:
@@ -23,7 +24,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y e2fsprogs xxd openssl git python3 gzip
+          # NOTE: cryptsetup-bin provides veritysetup (native dm-verity tool)
+          sudo apt-get install -y e2fsprogs xxd openssl git python3 gzip cryptsetup-bin
           git clone https://android.googlesource.com/platform/external/avb
           test -f avb/avbtool.py || { echo "avbtool.py missing"; exit 1; }
 
@@ -32,6 +34,7 @@ jobs:
           openssl genrsa -out testkey_rsa2048.pem 2048
           openssl rsa -in testkey_rsa2048.pem -pubout -out testkey_rsa2048_pub.pem
 
+      # Keep the image small so verification is fast and stable
       - name: Create ext4 image (16MiB)
         run: bash scripts/make_ext4.sh system.img 16
 
@@ -44,7 +47,6 @@ jobs:
           set -euo pipefail
           echo "---- avbtool info_image (system_with_hashtree.img) ----"
           python3 avb/avbtool.py info_image --image system_with_hashtree.img | sed -n '1,160p'
-          echo "---- file size ----"
           stat -c "file_size=%s" system_with_hashtree.img
 
       - name: Make vbmeta
@@ -55,46 +57,102 @@ jobs:
           python3 avb/avbtool.py calculate_vbmeta_digest \
             --image vbmeta.img --hash_algorithm sha256 | tee digest_clean.txt
 
+      # --- veritysetup section: parse params & verify (fast path) ---
+
+      - name: Extract hashtree params
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 avb/avbtool.py info_image --image system_with_hashtree.img > info.txt
+
+          # Robust parses (labels from avbtool output shown in your logs)
+          IMG_SZ=$(grep -i '^ *Image Size:'         info.txt | awk '{print $3}')
+          OFF=$(    grep -i '^ *Tree Offset:'       info.txt | awk '{print $3}')
+          HSIZE=$(  grep -i '^ *Tree Size:'         info.txt | awk '{print $3}')
+          DBS=$(    grep -i '^ *Data Block Size:'   info.txt | awk '{print $4}')
+          HBS=$(    grep -i '^ *Hash Block Size:'   info.txt | awk '{print $4}')
+          SALT=$(   grep -i '^ *Salt:'              info.txt | awk '{print $2}')
+          ROOT=$(   grep -i '^ *Root Digest:'       info.txt | awk '{print $3}')
+
+          echo "Parsed: IMG_SZ=$IMG_SZ OFF=$OFF HSIZE=$HSIZE DBS=$DBS HBS=$HBS"
+          echo "Parsed: SALT=$SALT"
+          echo "Parsed: ROOT=$ROOT"
+
+          # data blocks = image_size / data_block_size
+          DATABLOCKS=$(( IMG_SZ / DBS ))
+          echo "DATABLOCKS=$DATABLOCKS"
+
+          # export to later steps
+          {
+            echo "img_sz=$IMG_SZ"
+            echo "off=$OFF"
+            echo "hsz=$HSIZE"
+            echo "dbs=$DBS"
+            echo "hbs=$HBS"
+            echo "salt=$SALT"
+            echo "root=$ROOT"
+            echo "datablocks=$DATABLOCKS"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Baseline verify with veritysetup (clean must pass)
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'verity(clean): %E cpu:%P mem:%MKB' \
+            sudo veritysetup --debug verify \
+              --no-superblock \
+              --data-block-size=${{ steps.params.outputs.dbs }} \
+              --hash-block-size=${{ steps.params.outputs.hbs }} \
+              --data-blocks=${{ steps.params.outputs.datablocks }} \
+              --hash-offset=${{ steps.params.outputs.off }} \
+              --salt=${{ steps.params.outputs.salt }} \
+              system_with_hashtree.img system_with_hashtree.img \
+              ${{ steps.params.outputs.root }}
+          echo "✅ Clean image verified OK (veritysetup)"
+
       - name: Tamper image (flip blocks)
         run: |
           cp system_with_hashtree.img system_tampered.img
           dd if=/dev/urandom of=system_tampered.img bs=4096 \
              count=${{ inputs.count_blocks }} seek=${{ inputs.seek_block }} conv=notrunc
 
-      - name: Baseline verify (clean image should pass)
-        run: |
-          set -e
-          /usr/bin/timeout 90s /usr/bin/time -f 'verify(clean): %E cpu:%P mem:%MKB' \
-            python3 avb/avbtool.py verify_image --image system_with_hashtree.img
-          echo "Clean image verified OK"
-
-      - name: Tamper verify (tampered image must fail)
+      - name: Tamper verify with veritysetup (tampered must fail)
+        shell: bash
         run: |
           set +e
-          /usr/bin/timeout 90s /usr/bin/time -f 'verify(tampered): %E cpu:%P mem:%MKB' \
-            python3 avb/avbtool.py verify_image --image system_tampered.img
+          /usr/bin/time -f 'verity(tampered): %E cpu:%P mem:%MKB' \
+            sudo veritysetup --debug verify \
+              --no-superblock \
+              --data-block-size=${{ steps.params.outputs.dbs }} \
+              --hash-block-size=${{ steps.params.outputs.hbs }} \
+              --data-blocks=${{ steps.params.outputs.datablocks }} \
+              --hash-offset=${{ steps.params.outputs.off }} \
+              --salt=${{ steps.params.outputs.salt }} \
+              system_tampered.img system_tampered.img \
+              ${{ steps.params.outputs.root }}
           rc=$?
           if [ "$rc" -eq 0 ]; then
             echo "❌ Tamper NOT detected (verification still passes)"; exit 1
-          elif [ "$rc" -eq 124 ]; then
-            echo "❌ Timeout verifying tampered image (layout mismatch)"; exit 1
           else
-            echo "✅ Tamper detected (verification fails as expected)"
+            echo "✅ Tamper detected (verification fails as expected)"; exit 0
           fi
-
 
       - name: Publish summary
         run: |
           {
-            echo "## VerityOps Tamper Test"
+            echo "## VerityOps Tamper Test (veritysetup)"
             echo ""
             echo "**Blocks flipped:** ${{ inputs.count_blocks }} @ block ${{ inputs.seek_block }}"
             echo ""
-            echo "### vbmeta digests"
-            echo '```'
-            paste <(echo -n "clean    ") digest_clean.txt
-            paste <(echo -n "tampered ") digest_tampered.txt
-            echo '```'
+            echo "### Hashtree parameters"
+            echo "- Image Size:      ${{ steps.params.outputs.img_sz }}"
+            echo "- Tree Offset:     ${{ steps.params.outputs.off }}"
+            echo "- Tree Size:       ${{ steps.params.outputs.hsz }}"
+            echo "- Data Block Size: ${{ steps.params.outputs.dbs }}"
+            echo "- Hash Block Size: ${{ steps.params.outputs.hbs }}"
+            echo "- Salt:            ${{ steps.params.outputs.salt }}"
+            echo "- Root Digest:     ${{ steps.params.outputs.root }}"
           } >> $GITHUB_STEP_SUMMARY
 
       - name: Upload evidence
@@ -102,7 +160,8 @@ jobs:
         with:
           name: tamper-evidence
           path: |
+            info.txt
             digest_clean.txt
-            digest_tampered.txt
+            system_with_hashtree.img
+            system_tampered.img
             vbmeta.img
-            vbmeta_tampered.img
