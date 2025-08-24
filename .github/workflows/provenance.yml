@@ -1,0 +1,43 @@
+name: Provenance (checksums + SBOM)
+
+on:
+  workflow_run:
+    workflows: ["VerityOps Tamper Test"]
+    types: [completed]
+
+jobs:
+  provenance:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts from Tamper Test
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          path: out
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Checksums + SBOM
+        run: |
+          cd out
+          # Checksums for key images (if present)
+          ls -l
+          ( sha256sum **/*.img *.img 2>/dev/null || true ) | tee CHECKSUMS.txt
+          # SBOM for the artifact folder
+          syft dir:. -o spdx-json > SBOM.artifacts.spdx.json
+          # Lightweight provenance note
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "source_workflow_run=${{ github.event.workflow_run.id }}"
+            echo "commit=${{ github.event.workflow_run.head_sha }}"
+            echo "generated_at=$(date -u +%FT%TZ)"
+          } > PROVENANCE.txt
+
+      - name: Upload provenance bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-bundle
+          path: out/CHECKSUMS.txt,out/SBOM.artifacts.spdx.json,out/PROVENANCE.txt

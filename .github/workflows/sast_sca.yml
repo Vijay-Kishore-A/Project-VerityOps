@@ -1,0 +1,87 @@
+name: SAST & SCA
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sast_sca:
+    runs-on: ubuntu-latest
+    env:
+      # Policy thresholds (tune as you like)
+      POLICY_MAX_CRITICAL: "0"
+      POLICY_MAX_HIGH: "0"
+      POLICY_MAX_BANDIT_HIGH: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install tools (shellcheck, jq)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck jq python3 python3-pip
+
+      # ---------- SAST: bash ----------
+      - name: SAST - shellcheck (bash)
+        if: ${{ hashFiles('scripts/*.sh') != '' }}
+        run: |
+          mkdir -p reports
+          # Report, but don't fail here; let policy gate decide
+          ( shellcheck -S style -f gcc scripts/*.sh | tee reports/shellcheck.txt ) || true
+
+      # ---------- SAST: python ----------
+      - name: SAST - bandit (python)
+        if: ${{ hashFiles('**/*.py') != '' }}
+        run: |
+          pip3 install --quiet bandit
+          # JSON so policy can parse; exclude avb repo
+          bandit -r . -x avb -q -f json -o reports/bandit.json || true
+
+      # ---------- SCA: SBOM + CVE ----------
+      - name: Install Syft & Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM (Syft)
+        run: |
+          syft dir:. -o spdx-json > reports/sbom.spdx.json
+
+      - name: Scan SBOM (Grype → JSON)
+        run: |
+          grype sbom:reports/sbom.spdx.json --only-fixed -o json > reports/grype.json || true
+
+      # ---------- Policy gate ----------
+      - name: Policy gate
+        run: |
+          chmod +x policy/policy_check.sh
+          policy/policy_check.sh \
+            --grype reports/grype.json \
+            --bandit reports/bandit.json \
+            --max-critical "${POLICY_MAX_CRITICAL}" \
+            --max-high "${POLICY_MAX_HIGH}" \
+            --max-bandit-high "${POLICY_MAX_BANDIT_HIGH}"
+
+      # ---------- Summary & artifacts ----------
+      - name: Security summary
+        run: |
+          {
+            echo "## SAST/SCA summary"
+            if [ -f reports/grype.json ]; then
+              CRIT=$(jq '[.matches[].vulnerability.severity | select(.=="Critical")] | length' reports/grype.json)
+              HIGH=$(jq '[.matches[].vulnerability.severity | select(.=="High")] | length' reports/grype.json)
+              echo "- Grype: Critical=$CRIT  High=$HIGH"
+            fi
+            if [ -f reports/bandit.json ]; then
+              BHIGH=$(jq '[.results[] | select(.issue_severity=="HIGH")] | length' reports/bandit.json)
+              echo "- Bandit: High=$BHIGH"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SAST/SCA artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-sca-reports
+          path: reports/**
