@@ -38,6 +38,15 @@ jobs:
       - name: Add dm-verity hashtree
         run: bash scripts/add_hashtree.sh system.img system_with_hashtree.img testkey_rsa2048.pem 8
 
+      - name: Sanity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "---- avbtool info_image (system_with_hashtree.img) ----"
+          python3 avb/avbtool.py info_image --image system_with_hashtree.img | sed -n '1,160p'
+          echo "---- file size ----"
+          stat -c "file_size=%s" system_with_hashtree.img
+
       - name: Make vbmeta
         run: bash scripts/make_vbmeta.sh system_with_hashtree.img testkey_rsa2048.pem vbmeta.img
 
@@ -55,20 +64,22 @@ jobs:
       - name: Baseline verify (clean image should pass)
         run: |
           set -e
-          /usr/bin/time -f 'verify(clean): %E cpu:%P mem:%MKB' \
-          python3 avb/avbtool.py verify_image --image system_with_hashtree.img
+          /usr/bin/timeout 90s /usr/bin/time -f 'verify(clean): %E cpu:%P mem:%MKB' \
+            python3 avb/avbtool.py verify_image --image system_with_hashtree.img
           echo "Clean image verified OK"
 
       - name: Tamper verify (tampered image must fail)
         run: |
           set +e
-          python3 avb/avbtool.py verify_image --image system_tampered.img
+          /usr/bin/timeout 90s /usr/bin/time -f 'verify(tampered): %E cpu:%P mem:%MKB' \
+            python3 avb/avbtool.py verify_image --image system_tampered.img
           rc=$?
           if [ "$rc" -eq 0 ]; then
-            echo "Tamper NOT detected (verification still passes)"
-            exit 1
+            echo "❌ Tamper NOT detected (verification still passes)"; exit 1
+          elif [ "$rc" -eq 124 ]; then
+            echo "❌ Timeout verifying tampered image (layout mismatch)"; exit 1
           else
-            echo "Tamper detected (verification fails as expected)"
+            echo "✅ Tamper detected (verification fails as expected)"
           fi
 
 
