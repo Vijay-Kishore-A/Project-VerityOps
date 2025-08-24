@@ -24,11 +24,11 @@ jobs:
           openssl genrsa -out testkey_rsa2048.pem 2048
           openssl rsa -in testkey_rsa2048.pem -pubout -out testkey_rsa2048_pub.pem
 
-      - name: Create ext4 image (32MiB)
-        run: bash scripts/make_ext4.sh system.img 32
+      - name: Create ext4 image (16MiB)
+        run: bash scripts/make_ext4.sh system.img 16
 
       - name: Add dm-verity hashtree
-        run: bash scripts/add_hashtree.sh system.img system_with_hashtree.img testkey_rsa2048.pem 16
+        run: bash scripts/add_hashtree.sh system.img system_with_hashtree.img testkey_rsa2048.pem 8
 
       - name: Make vbmeta
         run: bash scripts/make_vbmeta.sh system_with_hashtree.img testkey_rsa2048.pem vbmeta.img
