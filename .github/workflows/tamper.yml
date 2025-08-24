@@ -65,25 +65,28 @@ jobs:
         run: |
           set -euo pipefail
           python3 avb/avbtool.py info_image --image system_with_hashtree.img > info.txt
-
-          # Robust parses (labels from avbtool output shown in your logs)
-          IMG_SZ=$(grep -i '^ *Image Size:'         info.txt | awk '{print $3}')
-          OFF=$(    grep -i '^ *Tree Offset:'       info.txt | awk '{print $3}')
-          HSIZE=$(  grep -i '^ *Tree Size:'         info.txt | awk '{print $3}')
-          DBS=$(    grep -i '^ *Data Block Size:'   info.txt | awk '{print $4}')
-          HBS=$(    grep -i '^ *Hash Block Size:'   info.txt | awk '{print $4}')
-          SALT=$(   grep -i '^ *Salt:'              info.txt | awk '{print $2}')
-          ROOT=$(   grep -i '^ *Root Digest:'       info.txt | awk '{print $3}')
-
+      
+          # Pull a single numeric value (decimal) for each parameter.
+          # head -1 ensures we don't pick up duplicate/variant lines.
+          IMG_SZ=$(grep -i '^ *Image Size:'       info.txt | head -1 | grep -oE '[0-9]+' | head -1)
+          OFF=$(    grep -i '^ *Tree Offset:'     info.txt | head -1 | grep -oE '[0-9]+' | head -1)
+          HSIZE=$(  grep -i '^ *Tree Size:'       info.txt | head -1 | grep -oE '[0-9]+' | head -1)
+          DBS=$(    grep -i '^ *Data Block Size:' info.txt | head -1 | grep -oE '[0-9]+' | head -1)
+          HBS=$(    grep -i '^ *Hash Block Size:' info.txt | head -1 | grep -oE '[0-9]+' | head -1)
+      
+          # Salt and root digest are hex strings in the descriptor (keep as-is).
+          SALT=$(grep -i '^ *Salt:'        info.txt | head -1 | awk '{print $2}')
+          ROOT=$(grep -i '^ *Root Digest:' info.txt | head -1 | awk '{print $3}')
+      
           echo "Parsed: IMG_SZ=$IMG_SZ OFF=$OFF HSIZE=$HSIZE DBS=$DBS HBS=$HBS"
           echo "Parsed: SALT=$SALT"
           echo "Parsed: ROOT=$ROOT"
-
-          # data blocks = image_size / data_block_size
-          DATABLOCKS=$(( IMG_SZ / DBS ))
+      
+          # Compute data blocks safely (integer division) with awk.
+          DATABLOCKS=$(awk -v s="${IMG_SZ:-0}" -v b="${DBS:-1}" 'BEGIN{ if (b>0) printf "%d", int(s/b); else print 0 }')
           echo "DATABLOCKS=$DATABLOCKS"
-
-          # export to later steps
+      
+          # Expose for later steps
           {
             echo "img_sz=$IMG_SZ"
             echo "off=$OFF"
