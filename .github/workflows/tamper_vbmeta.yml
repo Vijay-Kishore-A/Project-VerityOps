@@ -1,0 +1,40 @@
+name: VerityOps VBMeta Tamper Test
+on: workflow_dispatch
+
+jobs:
+  vbmeta_tamper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y openssl python3
+          git clone https://android.googlesource.com/platform/external/avb
+          # Reuse artifacts from the main build path or rebuild quickly:
+          bash scripts/make_ext4.sh system.img 16
+          openssl genrsa -out testkey_rsa2048.pem 2048
+          python3 avb/avbtool.py add_hashtree_footer \
+            --image system.img --partition_name system --partition_size $((16*1024*1024)) \
+            --hash_algorithm sha256 --salt 00 --do_not_generate_fec
+          python3 avb/avbtool.py make_vbmeta_image \
+            --include_descriptors_from_image system.img \
+            --key testkey_rsa2048.pem --algorithm SHA256_RSA2048 --output vbmeta.img
+      - name: Baseline verify vbmeta signature (should pass)
+        run: |
+          openssl rsa -in testkey_rsa2048.pem -pubout -out pub.pem
+          python3 avb/avbtool.py verify_vbmeta_image \
+            --vbmeta_image vbmeta.img --key pub.pem
+      - name: Tamper vbmeta & verify (should fail)
+        run: |
+          cp vbmeta.img vbmeta_tampered.img
+          # Flip a byte inside vbmeta payload
+          printf '\xFF' | dd of=vbmeta_tampered.img bs=1 seek=256 count=1 conv=notrunc
+          set +e
+          python3 avb/avbtool.py verify_vbmeta_image \
+            --vbmeta_image vbmeta_tampered.img --key pub.pem
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "vbmeta tamper NOT detected"; exit 1
+          else
+            echo "vbmeta tamper detected (signature invalid)"; exit 0
+          fi
