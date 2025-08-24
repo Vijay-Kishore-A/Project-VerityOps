@@ -36,7 +36,7 @@ jobs:
           echo "Downloaded files:"
           ls -l out || true
           if [ ! -d out ] || [ -z "$(find out -type f -maxdepth 2 2>/dev/null)" ]; then
-            echo "❌ No artifacts were downloaded into ./out"
+            echo "No artifacts were downloaded into ./out"
             echo "   - Ensure the Tamper workflow uploaded an artifact named 'tamper-evidence'"
             echo "   - Ensure this workflow's 'workflows:' name matches the Tamper workflow title"
             exit 1
