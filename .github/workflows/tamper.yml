@@ -16,6 +16,7 @@ jobs:
   tamper_test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -24,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          # NOTE: cryptsetup-bin provides veritysetup (native dm-verity tool)
+          # cryptsetup-bin provides veritysetup (native dm-verity tool)
           sudo apt-get install -y e2fsprogs xxd openssl git python3 gzip cryptsetup-bin
           git clone https://android.googlesource.com/platform/external/avb
           test -f avb/avbtool.py || { echo "avbtool.py missing"; exit 1; }
@@ -34,7 +35,6 @@ jobs:
           openssl genrsa -out testkey_rsa2048.pem 2048
           openssl rsa -in testkey_rsa2048.pem -pubout -out testkey_rsa2048_pub.pem
 
-      # Keep the image small so verification is fast and stable
       - name: Create ext4 image (16MiB)
         run: bash scripts/make_ext4.sh system.img 16
 
@@ -57,43 +57,43 @@ jobs:
           python3 avb/avbtool.py calculate_vbmeta_digest \
             --image vbmeta.img --hash_algorithm sha256 | tee digest_clean.txt
 
-      # --- veritysetup section: parse params & verify (fast path) ---
-
-      - name: Extract hashtree params
+      # ---------- robust parameter extraction (python) ----------
+      - name: Extract hashtree params (robust)
         id: params
         shell: bash
         run: |
           set -euo pipefail
           python3 avb/avbtool.py info_image --image system_with_hashtree.img > info.txt
-      
-          # Narrow parsing to the "Hashtree descriptor" section, then pick the first match.
-          desc() { awk '/Hashtree descriptor/{f=1; next} f && NF{print} /Flags:/{exit}' info.txt; }
-      
-          OFF=$(   desc | grep -i '^ *Tree Offset:'       | head -1 | grep -oE '[0-9]+' | head -1)
-          HSIZE=$( desc | grep -i '^ *Tree Size:'         | head -1 | grep -oE '[0-9]+' | head -1)
-          DBS=$(   desc | grep -i '^ *Data Block Size:'   | head -1 | grep -oE '[0-9]+' | head -1)
-          HBS=$(   desc | grep -i '^ *Hash Block Size:'   | head -1 | grep -oE '[0-9]+' | head -1)
-          SALT=$(  desc | grep -i '^ *Salt:'              | head -1 | awk '{print $2}')
-          ROOT=$(  desc | grep -i '^ *Root Digest:'       | head -1 | awk '{print $3}')
-      
-          # data blocks = tree_offset / data_block_size  (do integer division safely)
-          DATABLOCKS=$(awk -v o="${OFF:-0}" -v b="${DBS:-1}" 'BEGIN{ if (b>0) printf "%d", int(o/b); else print 0 }')
-      
-          echo "Parsed: OFF=$OFF HSIZE=$HSIZE DBS=$DBS HBS=$HBS"
-          echo "Parsed: SALT=$SALT"
-          echo "Parsed: ROOT=$ROOT"
-          echo "DATABLOCKS=$DATABLOCKS"
-      
-          {
-            echo "off=$OFF"
-            echo "hsz=$HSIZE"
-            echo "dbs=$DBS"
-            echo "hbs=$HBS"
-            echo "salt=$SALT"
-            echo "root=$ROOT"
-            echo "datablocks=$DATABLOCKS"
-          } >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os, re
+          txt = open('info.txt','r',encoding='utf-8',errors='ignore').read()
+          m = re.search(r'Hashtree descriptor:\s*(.*?)(?:^\s*$|^VBMeta offset:)', txt, re.S|re.M)
+          blk = m.group(1) if m else txt
+          def num(key, default=None):
+              m = re.search(rf'^\s*{re.escape(key)}\s*:\s*(0x[0-9a-fA-F]+|\d+)', blk, re.M|re.I)
+              return int(m.group(1), 0) if m else default
+          def hexstr(key):
+              m = re.search(rf'^\s*{re.escape(key)}\s*:\s*([0-9a-fA-F]+)', blk, re.M|re.I)
+              return m.group(1) if m else ''
+          off  = num('Tree Offset', 0)
+          hsz  = num('Tree Size', 0)
+          dbs  = num('Data Block Size', 4096)
+          hbs  = num('Hash Block Size', 4096)
+          salt = hexstr('Salt')
+          root = hexstr('Root Digest')
+          datablocks = (off // dbs) if dbs else 0
+          print(f"OFF={off} HSZ={hsz} DBS={dbs} HBS={hbs}")
+          print(f"SALT={salt}")
+          print(f"ROOT={root}")
+          print(f"DATABLOCKS={datablocks}")
+          out = os.environ['GITHUB_OUTPUT']
+          with open(out, 'a') as f:
+              for k,v in [('off',off),('hsz',hsz),('dbs',dbs),('hbs',hbs),
+                          ('salt',salt),('root',root),('datablocks',datablocks)]:
+                  f.write(f"{k}={v}\n")
+          PY
 
+      # ---------- fast, deterministic verification via veritysetup ----------
       - name: Baseline verify with veritysetup (clean must pass)
         shell: bash
         run: |
@@ -145,13 +145,13 @@ jobs:
             echo "**Blocks flipped:** ${{ inputs.count_blocks }} @ block ${{ inputs.seek_block }}"
             echo ""
             echo "### Hashtree parameters"
-            echo "- Image Size:      ${{ steps.params.outputs.img_sz }}"
             echo "- Tree Offset:     ${{ steps.params.outputs.off }}"
             echo "- Tree Size:       ${{ steps.params.outputs.hsz }}"
             echo "- Data Block Size: ${{ steps.params.outputs.dbs }}"
             echo "- Hash Block Size: ${{ steps.params.outputs.hbs }}"
             echo "- Salt:            ${{ steps.params.outputs.salt }}"
             echo "- Root Digest:     ${{ steps.params.outputs.root }}"
+            echo "- Data Blocks:     ${{ steps.params.outputs.datablocks }}"
           } >> $GITHUB_STEP_SUMMARY
 
       - name: Upload evidence
